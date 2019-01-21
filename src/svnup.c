@@ -30,7 +30,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/tree.h>
+#include "tree.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -52,6 +52,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 
 #define SVNUP_VERSION "0.90"
@@ -63,6 +64,7 @@
 #define MD5Update MD5_Update
 #endif
 
+// #define DEBUG_COMMAND
 
 typedef struct {
 	int       socket_descriptor;
@@ -89,6 +91,10 @@ typedef struct {
 	int       trim_tree;
 	int       extra_files;
 	int       verbosity;
+	struct {
+		char* buffer;
+		size_t sz;
+	}http_auth_base64;
 } connector;
 
 
@@ -115,7 +121,7 @@ struct tree_node {
 /* Function Prototypes */
 
 static int		 tree_node_compare(const struct tree_node *, const struct tree_node *);
-static void		 prune(connector *, char *);
+static void		 prune(connector *, const char *);
 static char		*find_response_end(int, char *, char *);
 static void		 find_local_files(char *, const char *);
 static void		 reset_connection(connector *);
@@ -140,6 +146,7 @@ static void		 parse_additional_attributes(connector *, char *, char *, file_node
 static void		 get_files(connector *, char *, char *, file_node **, int, int);
 static void		 progress_indicator(connector *connection, char *, int, int);
 static void		 usage(char *);
+static int 		 _encode_http_auth(connector* c, const char* s, int len);
 #ifdef OPENSSL
 char *
 MD5End(MD5_CTX *ctx, char *buf);
@@ -192,7 +199,7 @@ RB_GENERATE(tree2, tree_node, link, tree_node_compare);
  */
 
 static void
-prune(connector *connection, char *path_target)
+prune(connector *connection, const char *path_target)
 {
 	DIR           *dp;
 	struct stat    local;
@@ -425,10 +432,15 @@ reset_connection(connector *connection)
 
 static void
 send_command(connector *connection, const char *command)
-{
+{	
 	int bytes_to_write, bytes_written, total_bytes_written;
 
 	if (command) {
+		#ifdef DEBUG_COMMAND
+			printf("------------ request ------------\n");
+			printf("%s\n", command);
+			printf("---------------------------------\n");
+		#endif
 		total_bytes_written = 0;
 		bytes_to_write = strlen(command);
 
@@ -605,6 +617,11 @@ process_command_svn(connector *connection, const char *command, unsigned int exp
 		fprintf(stdout, "==========\n>> Response:\n%s", connection->response);
 
 	connection->response[position] = '\0';
+	#ifdef DEBUG_COMMAND
+		printf("\n-------------- response --------------\n");
+		printf("%s\n", connection->response);
+		printf("----------------------------------------\n");
+	#endif
 
 	return (connection->response);
 }
@@ -661,7 +678,11 @@ process_command_http(connector *connection, char *command)
 					connection->socket_descriptor,
 					input,
 					BUFFER_UNIT);
-
+			#ifdef DEBUG_COMMAND
+				printf("\n------- slice --------\n");
+				printf("%s\n", input);
+				printf("-------------------------\n");
+			#endif
 			if (connection->response_length + bytes_read > connection->response_blocks * BUFFER_UNIT) {
 				connection->response_blocks += 1;
 				connection->response = (char *)realloc(
@@ -1158,6 +1179,11 @@ set_configuration_parameters(connector *connection, char *buffer, size_t length,
 			if (line[0] == '#')
 				continue;
 
+			// fix `\n` at last config file
+			if(item == NULL) {
+				item = line + strlen(line);
+			}
+
 			if (strstr(line, "host=") == line) {
 				line += 5;
 				if ((connection->address = (char *)realloc(connection->address, item - line + 1)) == NULL)
@@ -1193,6 +1219,14 @@ set_configuration_parameters(connector *connection, char *buffer, size_t length,
 					err(EXIT_FAILURE, "set_configuration connection->path_work realloc");
 
 				memcpy(connection->path_work, line, item - line);
+				continue;
+			}
+
+			if(strstr(line, "auth=") == line) {
+				line += 5;
+				if(_encode_http_auth(connection, line, item-line)) {
+					errx(EXIT_FAILURE, "Invalid http authorization");
+				}
 				continue;
 			}
 
@@ -1513,6 +1547,7 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 		"REPORT /%s/!svn/me HTTP/1.1\r\n"
 		"Host: %s\r\n"
 		"User-Agent: svnup-%s\r\n"
+		"Authorization: Basic %s\r\n"
 		"Content-Type: text/xml\r\n"
 		"DAV: http://subversion.tigris.org/xmlns/dav/svn/depth\r\n"
 		"DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo\r\n"
@@ -1529,6 +1564,7 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 		connection->root,
 		connection->address,
 		SVNUP_VERSION,
+		(connection->http_auth_base64.buffer)?(connection->http_auth_base64.buffer):(""),
 		strlen(connection->branch) + revision_length + revision_length + strlen(SVNUP_VERSION) + 206,
 		connection->branch,
 		connection->revision,
@@ -1923,9 +1959,36 @@ usage(char *configuration_file)
 	fprintf(stderr, "          normal output, 2 = also show a progress indicator, 3 = also show\n");
 	fprintf(stderr, "          command and response text plus command response parsing codes).\n");
 	fprintf(stderr, "    -V  Display svnup's version number and exit.\n");
+	fprintf(stderr, "    -a http authorization example: -a user:password\n");
 	fprintf(stderr, "\n");
 
 	exit(EXIT_FAILURE);
+}
+
+static int
+_encode_http_auth(connector* c, const char* s, int len) {
+	if(s == NULL || c->http_auth_base64.buffer != NULL) {
+		return 1;
+	}
+
+	BIO *bio, *b64;
+	FILE* stream;
+	len = (len==0)?(strlen(s)):(len);
+	int encodedSize = 4*ceil((double)len/3);
+	c->http_auth_base64.sz = encodedSize+1;
+	c->http_auth_base64.buffer = (char *)malloc(c->http_auth_base64.sz);
+	char** buffer = &(c->http_auth_base64.buffer);
+
+	stream = fmemopen(*buffer, encodedSize+1, "w");
+	b64 = BIO_new(BIO_f_base64());
+	bio = BIO_new_fp(stream, BIO_NOCLOSE);
+	bio = BIO_push(b64, bio);
+	BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL); //Ignore newlines - write everything in one line
+	BIO_write(bio, s, len);
+	BIO_flush(bio);
+	BIO_free_all(bio);
+	fclose(stream);
+	return 0;
 }
 
 
@@ -1966,6 +2029,9 @@ main(int argc, char **argv)
 
 	command[0] = '\0';
 
+	connection.http_auth_base64.sz = 0;
+	connection.http_auth_base64.buffer = NULL;
+
 	connection.response_blocks = 10240;
 	connection.response_length = connection.revision = 0;
 
@@ -1997,7 +2063,7 @@ main(int argc, char **argv)
 		optind = 2;
 	}
 
-	while ((option = getopt(argc, argv, "46Vfntb:h:l:p:o:r:v:")) != -1) {
+	while ((option = getopt(argc, argv, "46Vfntb:h:l:p:o:r:v:a:")) != -1) {
 		switch (option) {
 			case '4':
 				connection.family = AF_INET;
@@ -2019,6 +2085,11 @@ main(int argc, char **argv)
 			case 'l':
 				connection.path_target = realloc(connection.path_target, strlen(optarg) + 2);
 				snprintf(connection.path_target, strlen(optarg) + 1, "%s", optarg);
+				break;
+			case 'a':
+				if(_encode_http_auth(&connection, optarg, 0)) {
+					errx(EXIT_FAILURE, "Invalid http authorization");
+				}
 				break;
 			case 'n':
 				display_last_revision = 1;
@@ -2220,6 +2291,7 @@ main(int argc, char **argv)
 				"OPTIONS /%s HTTP/1.1\r\n"
 				"Host: %s\r\n"
 				"User-Agent: svnup-%s\r\n"
+				"Authorization: Basic %s\r\n"
 				"Content-Type: text/xml\r\n"
 				"DAV: http://subversion.tigris.org/xmlns/dav/svn/depth\r\n"
 				"DAV: http://subversion.tigris.org/xmlns/dav/svn/mergeinfo\r\n"
@@ -2233,7 +2305,8 @@ main(int argc, char **argv)
 				"0\r\n\r\n",
 				connection.branch,
 				connection.address,
-				SVNUP_VERSION);
+				SVNUP_VERSION,
+				(connection.http_auth_base64.buffer)?(connection.http_auth_base64.buffer):(""));
 
 			process_command_http(&connection, command);
 
@@ -2315,8 +2388,10 @@ main(int argc, char **argv)
 					BUFFER_UNIT,
 					"PROPFIND %s HTTP/1.1\n"
 					"Depth: 1\n"
+					"Authorization: Basic %s\r\n"
 					"Host: %s\n\n",
 					file[f]->href,
+					(connection.http_auth_base64.buffer)?(connection.http_auth_base64.buffer):(""),
 					connection.address);
 			} else temp_buffer[0] = '\0';
 		}
@@ -2395,9 +2470,11 @@ main(int argc, char **argv)
 					snprintf(temp_buffer,
 						BUFFER_UNIT,
 						"GET %s HTTP/1.1\n"
+						"Authorization: Basic %s\r\n"
 						"Host: %s\n"
 						"Connection: Keep-Alive\n\n",
 						file[f]->href,
+						(connection.http_auth_base64.buffer)?(connection.http_auth_base64.buffer):(""),
 						connection.address);
 
 				if (connection.protocol == SVN)
@@ -2443,16 +2520,23 @@ main(int argc, char **argv)
 	save_known_file_list(&connection, file, file_count);
 
 	/* Any files left in the tree are safe to delete. */
-
-	RB_FOREACH(data, tree1, &known_files) {
-		if ((found = RB_FIND(tree1, &known_files, data)) != NULL)
-			free(RB_REMOVE(tree1, &known_files, found));
-
-		if ((found = RB_FIND(tree2, &local_files, data)) != NULL)
-			free(RB_REMOVE(tree2, &local_files, found));
-
-		prune(&connection, data->path);
+	struct tree_node _tmp;
+	struct tree_node* _tmp_p = &_tmp;
+	struct tree_node* elm = RB_MIN(tree1, &known_files);
+	while(elm) {
+		_tmp.path = elm->path;
+		elm = tree1_RB_NEXT(elm);
+		if ((found = RB_FIND(tree1, &known_files, _tmp_p)) != NULL) {
+			struct tree_node* p = RB_REMOVE(tree1, &known_files, found);
+			free(p);
 		}
+
+		if ((found = RB_FIND(tree2, &local_files, _tmp_p)) != NULL) {
+			struct tree_node* p = RB_REMOVE(tree2, &local_files, found);
+			free(p);
+		}
+		prune(&connection, _tmp_p->path);
+	}
 
 	if (connection.verbosity > 1)
 		printf("\r\e[0K\r");
@@ -2467,7 +2551,6 @@ main(int argc, char **argv)
 				fprintf(stderr, " * %s%s\n", connection.path_target, data->path);
 		}
 	}
-
 	/* Wrap it all up. */
 
 	if (close(connection.socket_descriptor) != 0)
