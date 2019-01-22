@@ -1527,6 +1527,23 @@ process_report_svn(connector *connection, char *command, file_node ***file, int 
  * in a dynamic array of file_nodes.
  */
 
+static char*
+_adjust_href(char* href) {
+	char* s = strstr(href, "/!svn/rvr/");
+	if(s) {
+		s += strlen("/!svn/rvr/");
+		// jump number
+		while(*s != '/' && *s != '\0') {
+			s++;
+		}
+		if(*s == '/'){
+			return s;
+		}
+	}
+	return href;
+}
+
+
 static void
 process_report_http(connector *connection, file_node ***file, int *file_count, int *file_max)
 {
@@ -1579,7 +1596,8 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 
 	while ((start = strstr(start, "<S:add-directory")) && (start < end)) {
 		value = parse_xml_value(start, end, "D:href");
-		temp = strstr(value, connection->trunk) + strlen(connection->trunk);
+		char* href = _adjust_href(value);
+		temp = strstr(href, connection->trunk) + strlen(connection->trunk);
 
 		snprintf(temp_buffer, BUFFER_UNIT, "%s%s", connection->path_target, temp);
 		mkdir(temp_buffer, 0755);
@@ -1592,7 +1610,8 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 	while ((start = strstr(start, "<S:add-file")) && (start < end)) {
 		md5  = parse_xml_value(start, end, "V:md5-checksum");
 		href = parse_xml_value(start, end, "D:href");
-		temp = strstr(href, connection->trunk);
+		temp = _adjust_href(href);
+		temp = strstr(temp, connection->trunk);
 		temp += strlen(connection->trunk);
 		path = strdup(temp);
 
