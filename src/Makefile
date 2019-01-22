@@ -5,7 +5,7 @@
 MDFLAGS= -lssl -lcrypto -DOPENSSL -lm
 
 svnup: svnup.c
-	$(CC) -g -O2 -Wall -o $@ $(CFLAGS) $? $(MDFLAGS)   -L/usr/local/opt/openssl/lib -I/usr/local/opt/openssl/include
+	$(CC) -g -O2 -Wno-unused-result  -Wall -o $@ $(CFLAGS) $? $(MDFLAGS)   -L/usr/local/opt/openssl/lib -I/usr/local/opt/openssl/include
 
 install:
 	cp svnup.conf /usr/local/etc/svnup.conf
