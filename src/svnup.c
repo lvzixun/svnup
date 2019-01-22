@@ -1543,6 +1543,21 @@ _adjust_href(char* href) {
 	return href;
 }
 
+static void
+_adjust_hex_path(char* path) {
+	char* d = path;
+	while ((d = strchr(d, '%')) != NULL) {
+		if ((isxdigit(d[1])) && (isxdigit(d[2]))) {
+			d[1] = toupper(d[1]);
+			d[2] = toupper(d[2]);
+			*d = ((isalpha(d[1]) ? 10 + d[1] -'A' : d[1] - '0') << 4) +
+			      (isalpha(d[2]) ? 10 + d[2] -'A' : d[2] - '0');
+			memmove(d + 1, d + 3, strlen(path) - (d - path + 2));
+			d++;
+		}
+	}
+}
+
 
 static void
 process_report_http(connector *connection, file_node ***file, int *file_count, int *file_max)
@@ -1600,6 +1615,7 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 		temp = strstr(href, connection->trunk) + strlen(connection->trunk);
 
 		snprintf(temp_buffer, BUFFER_UNIT, "%s%s", connection->path_target, temp);
+		_adjust_hex_path(temp_buffer);
 		mkdir(temp_buffer, 0755);
 		free(value);
 		start++;
@@ -1618,15 +1634,7 @@ process_report_http(connector *connection, file_node ***file, int *file_count, i
 		/* Convert any hex encoded characters in the path. */
 
 		d = path;
-		while ((d = strchr(d, '%')) != NULL)
-			if ((isxdigit(d[1])) && (isxdigit(d[2]))) {
-				d[1] = toupper(d[1]);
-				d[2] = toupper(d[2]);
-				*d = ((isalpha(d[1]) ? 10 + d[1] -'A' : d[1] - '0') << 4) +
-				      (isalpha(d[2]) ? 10 + d[2] -'A' : d[2] - '0');
-				memmove(d + 1, d + 3, strlen(path) - (d - path + 2));
-				d++;
-			}
+		_adjust_hex_path(d);
 
 		this_file = new_file_node(file, file_count, file_max);
 		this_file->href = href;
