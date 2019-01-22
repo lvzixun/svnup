@@ -1077,7 +1077,7 @@ save_file(char *filename, char *revision_tag, char *start, char *end, int execut
 					err(EXIT_FAILURE, "Cannot link %s -> %s", start + 5, filename);
 		}
 	} else {
-		if ((fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC)) == -1)
+		if ((fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1)
 			err(EXIT_FAILURE, "write file failure %s", filename);
 
 		if (revision_tag) {
@@ -1111,7 +1111,7 @@ save_known_file_list(connector *connection, file_node **file, int file_count)
 	int               fd, x;
 	char              revision[16];
 
-	if ((fd = open(connection->known_files_new, O_WRONLY | O_CREAT | O_TRUNC)) == -1)
+	if ((fd = open(connection->known_files_new, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1)
 		err(EXIT_FAILURE, "write file failure %s", connection->known_files_new);
 
 	snprintf(revision, 16, "%u\r\n", connection->revision);
